@@ -51,40 +51,71 @@ bool Handshake::performHandshake(int entityId1, int entityId2,
         return false;
     }
 
-    // 2. Incarca cheile private si publice
+    // 2. Incarca cheile pentru ambele entitati
     std::cout << "Incarcare chei..." << std::endl;
     EVP_PKEY* privateKey1 = loadPrivateKey(entityId1, "ecc", password1);
+    EVP_PKEY* publicKey1 = loadPublicKey(entityId1, "ecc");
+    EVP_PKEY* privateKey2 = loadPrivateKey(entityId2, "ecc", password2);
     EVP_PKEY* publicKey2 = loadPublicKey(entityId2, "ecc");
 
-    if (!privateKey1 || !publicKey2) {
+    if (!privateKey1 || !publicKey1 || !privateKey2 || !publicKey2) {
         std::cerr << "Eroare la incarcarea cheilor!" << std::endl;
         if (privateKey1) EVP_PKEY_free(privateKey1);
+        if (publicKey1) EVP_PKEY_free(publicKey1);
+        if (privateKey2) EVP_PKEY_free(privateKey2);
         if (publicKey2) EVP_PKEY_free(publicKey2);
         return false;
     }
 
-    // 3. Realizeaza ECDH
+    // 3. Realizeaza ECDH in ambele directii
     std::cout << "Realizare schimb de chei ECDH..." << std::endl;
-    std::vector<unsigned char> sharedSecret = performECDH(privateKey1, publicKey2);
 
-    if (sharedSecret.empty()) {
+    // ECDH pentru entitatea 1 (foloseste cheia sa privata + cheia publica a entitatii 2)
+    std::vector<unsigned char> sharedSecret1 = performECDH(privateKey1, publicKey2);
+
+    // ECDH pentru entitatea 2 (foloseste cheia sa privata + cheia publica a entitatii 1)
+    std::vector<unsigned char> sharedSecret2 = performECDH(privateKey2, publicKey1);
+
+    if (sharedSecret1.empty() || sharedSecret2.empty()) {
         std::cerr << "Eroare la realizarea ECDH!" << std::endl;
         EVP_PKEY_free(privateKey1);
+        EVP_PKEY_free(publicKey1);
+        EVP_PKEY_free(privateKey2);
         EVP_PKEY_free(publicKey2);
         return false;
     }
 
-    // 4. Extrage componentele x si y din secretul partajat
-    std::cout << "Derivare cheie simetrica..." << std::endl;
-    SymmetricElements symElements = deriveSymmetricKey(sharedSecret);
-    symElements.symElementsId = entityId1 * 1000 + entityId2; // ID unic pentru pereche
+    // Verifica ca ambele secrete partajate sunt identice (proprietatea ECDH)
+    if (sharedSecret1.size() != sharedSecret2.size() ||
+        memcmp(sharedSecret1.data(), sharedSecret2.data(), sharedSecret1.size()) != 0) {
+        std::cerr << "Eroare: Secretele partajate ECDH nu sunt identice!" << std::endl;
+        EVP_PKEY_free(privateKey1);
+        EVP_PKEY_free(publicKey1);
+        EVP_PKEY_free(privateKey2);
+        EVP_PKEY_free(publicKey2);
+        return false;
+    }
 
-    // 5. Salveaza elementele simetrice
+    // 4. Deriveaza elementele simetrice pentru fiecare entitate
+    std::cout << "Derivare cheie simetrica..." << std::endl;
+
+    // Pentru entitatea 1
+    SymmetricElements symElements1 = deriveSymmetricKey(sharedSecret1);
+    symElements1.symElementsId = entityId1 * 10000 + entityId2;
+
+    // Pentru entitatea 2  
+    SymmetricElements symElements2 = deriveSymmetricKey(sharedSecret2);
+    symElements2.symElementsId = entityId2 * 10000 + entityId1;
+
+    // 5. Salveaza elementele simetrice separate pentru fiecare entitate
     std::cout << "Salvare elemente simetrice..." << std::endl;
-    bool success = saveSymmetricElements(symElements, entityId1, entityId2);
+    bool success = saveSymmetricElementsForEntity(symElements1, entityId1) &&
+        saveSymmetricElementsForEntity(symElements2, entityId2);
 
     // Cleanup
     EVP_PKEY_free(privateKey1);
+    EVP_PKEY_free(publicKey1);
+    EVP_PKEY_free(privateKey2);
     EVP_PKEY_free(publicKey2);
 
     if (success) {
@@ -344,9 +375,16 @@ std::vector<unsigned char> Handshake::deriveSymRight(const std::vector<unsigned 
 // Salveaza elementele simetrice in format DER codat Base64
 bool Handshake::saveSymmetricElements(const SymmetricElements & elements,
     int entityId1, int entityId2) {
-    // Genereaza nume de fisier
-    std::string filename1 = getSymmetricElementsFilename(entityId1);
-    std::string filename2 = getSymmetricElementsFilename(entityId2);
+    // DEPRECATED - Aceasta metoda nu mai trebuie folosita
+    // Folositi saveSymmetricElementsForEntity() in schimb
+    return saveSymmetricElementsForEntity(elements, entityId1) &&
+        saveSymmetricElementsForEntity(elements, entityId2);
+}
+
+// Salveaza elementele simetrice pentru o singura entitate
+bool Handshake::saveSymmetricElementsForEntity(const SymmetricElements & elements,
+    int entityId) {
+    std::string filename = getSymmetricElementsFilename(entityId);
 
     // Creeaza structura DER
     // SymElements := Sequence {
@@ -406,22 +444,17 @@ bool Handshake::saveSymmetricElements(const SymmetricElements & elements,
 
     BIO_free_all(b64);
 
-    // Salveaza in fisiere
-    std::ofstream file1(filename1);
-    std::ofstream file2(filename2);
-
-    if (!file1 || !file2) {
-        std::cerr << "Eroare la crearea fisierelor de elemente simetrice" << std::endl;
+    // Salveaza in fisier
+    std::ofstream file(filename);
+    if (!file) {
+        std::cerr << "Eroare la crearea fisierului " << filename << std::endl;
         return false;
     }
 
-    file1 << base64Data;
-    file2 << base64Data;
+    file << base64Data;
+    file.close();
 
-    file1.close();
-    file2.close();
-
-    std::cout << "Elemente simetrice salvate: " << filename1 << ", " << filename2 << std::endl;
+    std::cout << "Elemente simetrice salvate: " << filename << std::endl;
     return true;
 }
 

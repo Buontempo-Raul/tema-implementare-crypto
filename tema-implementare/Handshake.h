@@ -58,6 +58,10 @@ private:
     bool saveSymmetricElements(const SymmetricElements& elements,
         int entityId1, int entityId2);
 
+    // Salvarea elementelor simetrice pentru o entitate
+    bool saveSymmetricElementsForEntity(const SymmetricElements& elements,
+        int entityId);
+
     // Verificare MAC
     bool verifyMAC(int entityId, const std::string& keyType);
 

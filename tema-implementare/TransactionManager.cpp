@@ -32,7 +32,7 @@ bool TransactionManager::processTransaction(int transactionId, int senderId, int
         " catre " + std::to_string(receiverId));
 
     try {
-        // 1. Incarca elementele simetrice
+        // 1. Incarca elementele simetrice pentru sender
         SymmetricElements symElements = loadSymmetricElements(senderId);
         if (symElements.symKey.empty() || symElements.iv.empty()) {
             std::cerr << "Nu s-au putut incarca elementele simetrice!" << std::endl;
@@ -84,6 +84,10 @@ bool TransactionManager::processTransaction(int transactionId, int senderId, int
         }
 
         std::cout << "Tranzactie procesata cu succes!" << std::endl;
+        std::cout << "  Dimensiune mesaj original: " << message.size() << " bytes" << std::endl;
+        std::cout << "  Dimensiune mesaj criptat: " << encryptedData.size() << " bytes" << std::endl;
+        std::cout << "  Dimensiune semnatura: " << signature.size() << " bytes" << std::endl;
+
         Logger::getInstance()->logAction(senderId, Logger::TRANSACTION,
             "Tranzactie " + std::to_string(transactionId) + " procesata cu succes");
         Logger::getInstance()->logAction(receiverId, Logger::TRANSACTION,
@@ -188,6 +192,25 @@ std::vector<unsigned char> TransactionManager::fancyOFBEncrypt(const std::vector
         // Actualizeaza state pentru urmatorul bloc
         // State devine output-ul AES_encrypt (inainte de XOR cu inv_IV)
         std::copy(aes_output.begin(), aes_output.end(), state.begin());
+    }
+
+    // Handle ultimul bloc daca nu e multiplu de 16
+    if (data.size() % 16 != 0) {
+        // Cripta un ultim bloc pentru padding
+        int len;
+        if (EVP_EncryptUpdate(ctx, aes_output.data(), &len, state.data(), 16) == 1) {
+            // Aplica operatia XOR inv_IV
+            for (int j = 0; j < 16; j++) {
+                keystream[j] = aes_output[j] ^ invIV[j];
+            }
+
+            // XOR cu restul datelor
+            size_t remainingBytes = data.size() % 16;
+            size_t offset = data.size() - remainingBytes;
+            for (size_t j = 0; j < remainingBytes; j++) {
+                ciphertext.push_back(data[offset + j] ^ keystream[j]);
+            }
+        }
     }
 
     EVP_CIPHER_CTX_free(ctx);
@@ -338,7 +361,7 @@ bool TransactionManager::saveTransaction(const TransactionData& transaction) {
     // SEQUENCE tag
     der.push_back(0x30);
     size_t seqLenPos = der.size();
-    der.push_back(0); // placeholder
+    der.push_back(0); // placeholder - vom actualiza mai tarziu
 
     // TransactionID - INTEGER
     der.push_back(0x02);
@@ -387,40 +410,59 @@ bool TransactionManager::saveTransaction(const TransactionData& transaction) {
         idBytes.insert(idBytes.begin(), id & 0xFF);
         id >>= 8;
     }
+    if (idBytes.empty()) idBytes.push_back(0);
     der.push_back(idBytes.size());
     der.insert(der.end(), idBytes.begin(), idBytes.end());
 
     // EncryptedData - OCTET STRING
     der.push_back(0x04);
+    // Tratare lung form pentru lungimi mari
     if (transaction.encryptedData.size() < 128) {
         der.push_back(transaction.encryptedData.size());
     }
-    else {
-        der.push_back(0x81); // long form
+    else if (transaction.encryptedData.size() < 256) {
+        der.push_back(0x81); // long form cu 1 byte
         der.push_back(transaction.encryptedData.size());
+    }
+    else {
+        der.push_back(0x82); // long form cu 2 bytes
+        der.push_back((transaction.encryptedData.size() >> 8) & 0xFF);
+        der.push_back(transaction.encryptedData.size() & 0xFF);
     }
     der.insert(der.end(), transaction.encryptedData.begin(), transaction.encryptedData.end());
 
     // TransactionSign - OCTET STRING
     der.push_back(0x04);
+    // Tratare lung form pentru lungimi mari (semnatura RSA 3072-bit = 384 bytes)
     if (transaction.signature.size() < 128) {
         der.push_back(transaction.signature.size());
     }
-    else {
-        der.push_back(0x81); // long form
+    else if (transaction.signature.size() < 256) {
+        der.push_back(0x81); // long form cu 1 byte
         der.push_back(transaction.signature.size());
+    }
+    else {
+        der.push_back(0x82); // long form cu 2 bytes
+        der.push_back((transaction.signature.size() >> 8) & 0xFF);
+        der.push_back(transaction.signature.size() & 0xFF);
     }
     der.insert(der.end(), transaction.signature.begin(), transaction.signature.end());
 
-    // Actualizeaza lungimea
+    // Actualizeaza lungimea totala a secventei
     size_t totalLen = der.size() - seqLenPos - 1;
     if (totalLen < 128) {
         der[seqLenPos] = totalLen;
     }
-    else {
-        // Long form
+    else if (totalLen < 256) {
+        // Long form cu 1 byte
         der[seqLenPos] = 0x81;
         der.insert(der.begin() + seqLenPos + 1, totalLen);
+    }
+    else {
+        // Long form cu 2 bytes  
+        der[seqLenPos] = 0x82;
+        der.insert(der.begin() + seqLenPos + 1, (totalLen >> 8) & 0xFF);
+        der.insert(der.begin() + seqLenPos + 2, totalLen & 0xFF);
     }
 
     // Scrie in fisier
