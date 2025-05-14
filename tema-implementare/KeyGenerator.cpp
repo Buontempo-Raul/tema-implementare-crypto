@@ -159,11 +159,33 @@ bool KeyGenerator::savePrivateKey(EVP_PKEY* key, const std::string& filename,
         return false;
     }
 
-    // Pentru OpenSSL 3.0+, folosim PKCS8 pentru toate tipurile de chei
-    // Aceasta este practica recomandata si evita functiile deprecate
-    int result = PEM_write_bio_PKCS8PrivateKey(bio, key, EVP_aes_256_cbc(),
-        password.c_str(), password.length(),
-        nullptr, nullptr);
+    int result = 0;
+
+    // Verifica tipul cheii pentru a folosi formatul corect
+    int keyType = EVP_PKEY_id(key);
+
+    if (keyType == EVP_PKEY_RSA) {
+        // Pentru chei RSA, folosim format PKCS1 conform cerintelor
+        RSA* rsa = EVP_PKEY_get1_RSA(key);
+        if (rsa) {
+            result = PEM_write_bio_RSAPrivateKey(bio, rsa, EVP_aes_256_cbc(),
+                (unsigned char*)password.c_str(), password.length(),
+                nullptr, nullptr);
+            RSA_free(rsa);
+        }
+    }
+    else if (keyType == EVP_PKEY_EC) {
+        // Pentru chei EC, folosim format PKCS8 conform cerintelor
+        result = PEM_write_bio_PKCS8PrivateKey(bio, key, EVP_aes_256_cbc(),
+            password.c_str(), password.length(),
+            nullptr, nullptr);
+    }
+    else {
+        // Pentru alte tipuri de chei, folosim PKCS8 ca default
+        result = PEM_write_bio_PKCS8PrivateKey(bio, key, EVP_aes_256_cbc(),
+            password.c_str(), password.length(),
+            nullptr, nullptr);
+    }
 
     BIO_free(bio);
 
