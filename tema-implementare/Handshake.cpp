@@ -1,21 +1,20 @@
-#include "KeyGenerator.h"
 #include <openssl/err.h>
 #include <openssl/bio.h>
 #include <openssl/evp.h>
 #include <openssl/sha.h>
 #include <openssl/rand.h>
-#include <openssl/pkcs12.h>
-#include <openssl/rsa.h>
 #include <openssl/pem.h>
+#include <openssl/ec.h>
+#include <openssl/bn.h>
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <ctime>
 #include <iomanip>
-#include <cmath>
 #include "Logger.h"
+#include "Handshake.h"
 
-// Pentru compatibilitate cu OpenSSL 3.0+
+
 #ifdef OPENSSL_VERSION_MAJOR
 #if OPENSSL_VERSION_MAJOR >= 3
 #define OPENSSL_SUPPRESS_DEPRECATED
@@ -24,296 +23,417 @@
 #endif
 
 // Constructor
-KeyGenerator::KeyGenerator() {
-    // Initializeaza biblioteca OpenSSL
+Handshake::Handshake() {
     OpenSSL_add_all_algorithms();
     ERR_load_crypto_strings();
 }
 
 // Destructor
-KeyGenerator::~KeyGenerator() {
-    // Cleanup OpenSSL
+Handshake::~Handshake() {
     EVP_cleanup();
     ERR_free_strings();
 }
 
-// Functie auxiliara pentru afisarea erorilor OpenSSL
-void printOpenSSLError() {
-    unsigned long err = ERR_get_error();
-    char err_buf[256];
-    ERR_error_string_n(err, err_buf, sizeof(err_buf));
-    std::cerr << "OpenSSL Error: " << err_buf << std::endl;
-}
+// Metoda principala pentru realizarea handshake-ului
+bool Handshake::performHandshake(int entityId1, int entityId2,
+    const std::string& password1,
+    const std::string& password2) {
+    std::cout << "\n=== Realizare handshake intre entitatea " << entityId1
+        << " si entitatea " << entityId2 << " ===" << std::endl;
 
-// Genereaza o pereche de chei EC
-bool KeyGenerator::generateECKeyPair(int entityId, const std::string& password) {
-    std::cout << "Generare chei EC pentru entitatea " << entityId << "..." << std::endl;
-
-    EVP_PKEY* ecKey = generateECKey();
-    if (!ecKey) {
-        std::cerr << "Eroare la generarea cheii EC!" << std::endl;
-        Logger::getInstance()->logAction(entityId, Logger::ERROR, "Eroare generare cheie EC");
+    // 1. Verifica autenticitatea cheilor
+    std::cout << "Verificare autenticitate chei..." << std::endl;
+    if (!verifyKeyAuthenticity(entityId1, "ecc") ||
+        !verifyKeyAuthenticity(entityId2, "ecc")) {
+        std::cerr << "Autenticitatea cheilor nu a putut fi verificata!" << std::endl;
+        Logger::getInstance()->logAction(entityId1, Logger::ERROR,
+            "Eroare verificare autenticitate chei pentru handshake cu " + std::to_string(entityId2));
         return false;
     }
 
-    // Salveaza cheile
-    std::string privateFile = getPrivateKeyFilename(entityId, "ecc");
-    std::string publicFile = getPublicKeyFilename(entityId, "ecc");
+    // 2. Incarca cheile private si publice
+    std::cout << "Incarcare chei..." << std::endl;
+    EVP_PKEY* privateKey1 = loadPrivateKey(entityId1, "ecc", password1);
+    EVP_PKEY* publicKey2 = loadPublicKey(entityId2, "ecc");
 
-    bool success = savePrivateKey(ecKey, privateFile, password) &&
-        savePublicKey(ecKey, publicFile);
-
-    if (success) {
-        Logger::getInstance()->logAction(entityId, Logger::KEY_GENERATION, "Chei EC generate");
-    }
-
-    EVP_PKEY_free(ecKey);
-    return success;
-}
-
-// Genereaza o pereche de chei RSA
-bool KeyGenerator::generateRSAKeyPair(int entityId, const std::string& password) {
-    std::cout << "Generare chei RSA pentru entitatea " << entityId << "..." << std::endl;
-
-    EVP_PKEY* rsaKey = generateRSAKey();
-    if (!rsaKey) {
-        std::cerr << "Eroare la generarea cheii RSA!" << std::endl;
-        Logger::getInstance()->logAction(entityId, Logger::ERROR, "Eroare generare cheie RSA");
+    if (!privateKey1 || !publicKey2) {
+        std::cerr << "Eroare la incarcarea cheilor!" << std::endl;
+        if (privateKey1) EVP_PKEY_free(privateKey1);
+        if (publicKey2) EVP_PKEY_free(publicKey2);
         return false;
     }
 
-    // Salveaza cheile
-    std::string privateFile = getPrivateKeyFilename(entityId, "rsa");
-    std::string publicFile = getPublicKeyFilename(entityId, "rsa");
+    // 3. Realizeaza ECDH
+    std::cout << "Realizare schimb de chei ECDH..." << std::endl;
+    std::vector<unsigned char> sharedSecret = performECDH(privateKey1, publicKey2);
 
-    bool success = savePrivateKey(rsaKey, privateFile, password) &&
-        savePublicKey(rsaKey, publicFile);
-
-    if (success) {
-        Logger::getInstance()->logAction(entityId, Logger::KEY_GENERATION, "Chei RSA generate");
+    if (sharedSecret.empty()) {
+        std::cerr << "Eroare la realizarea ECDH!" << std::endl;
+        EVP_PKEY_free(privateKey1);
+        EVP_PKEY_free(publicKey2);
+        return false;
     }
 
-    EVP_PKEY_free(rsaKey);
+    // 4. Extrage componentele x si y din secretul partajat
+    std::cout << "Derivare cheie simetrica..." << std::endl;
+    SymmetricElements symElements = deriveSymmetricKey(sharedSecret);
+    symElements.symElementsId = entityId1 * 1000 + entityId2; // ID unic pentru pereche
+
+    // 5. Salveaza elementele simetrice
+    std::cout << "Salvare elemente simetrice..." << std::endl;
+    bool success = saveSymmetricElements(symElements, entityId1, entityId2);
+
+    // Cleanup
+    EVP_PKEY_free(privateKey1);
+    EVP_PKEY_free(publicKey2);
+
+    if (success) {
+        std::cout << "Handshake realizat cu succes!" << std::endl;
+        Logger::getInstance()->logAction(entityId1, Logger::HANDSHAKE,
+            "Handshake realizat cu entitatea " + std::to_string(entityId2));
+        Logger::getInstance()->logAction(entityId2, Logger::HANDSHAKE,
+            "Handshake realizat cu entitatea " + std::to_string(entityId1));
+    }
+
     return success;
 }
 
-// Genereaza cheie EC
-EVP_PKEY* KeyGenerator::generateECKey() {
-    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
-    if (!ctx) return nullptr;
+// Verifica autenticitatea unei chei folosind MAC-ul salvat
+bool Handshake::verifyKeyAuthenticity(int entityId, const std::string& keyType) {
+    bool result = verifyMAC(entityId, keyType);
 
-    EVP_PKEY* pkey = nullptr;
-
-    if (EVP_PKEY_keygen_init(ctx) <= 0) {
-        EVP_PKEY_CTX_free(ctx);
-        return nullptr;
+    if (result) {
+        Logger::getInstance()->logAction(entityId, Logger::MAC_VERIFICATION,
+            "MAC verificat pentru cheia " + keyType);
+    }
+    else {
+        Logger::getInstance()->logAction(entityId, Logger::ERROR,
+            "Eroare verificare MAC pentru cheia " + keyType);
     }
 
-    // Folosim curba P-256 (secp256r1)
-    if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx, NID_X9_62_prime256v1) <= 0) {
-        EVP_PKEY_CTX_free(ctx);
-        return nullptr;
-    }
-
-    if (EVP_PKEY_keygen(ctx, &pkey) <= 0) {
-        EVP_PKEY_CTX_free(ctx);
-        return nullptr;
-    }
-
-    EVP_PKEY_CTX_free(ctx);
-    return pkey;
+    return result;
 }
 
-// Genereaza cheie RSA
-EVP_PKEY* KeyGenerator::generateRSAKey() {
-    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
-    if (!ctx) return nullptr;
-
-    EVP_PKEY* pkey = nullptr;
-
-    if (EVP_PKEY_keygen_init(ctx) <= 0) {
-        EVP_PKEY_CTX_free(ctx);
-        return nullptr;
-    }
-
-    if (EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, RSA_KEY_SIZE) <= 0) {
-        EVP_PKEY_CTX_free(ctx);
-        return nullptr;
-    }
-
-    if (EVP_PKEY_keygen(ctx, &pkey) <= 0) {
-        EVP_PKEY_CTX_free(ctx);
-        return nullptr;
-    }
-
-    EVP_PKEY_CTX_free(ctx);
-    return pkey;
-}
-
-// Salveaza cheia privata criptata
-bool KeyGenerator::savePrivateKey(EVP_PKEY* key, const std::string& filename,
+// Incarca o cheie privata criptata
+EVP_PKEY* Handshake::loadPrivateKey(int entityId, const std::string& keyType,
     const std::string& password) {
-    BIO* bio = BIO_new_file(filename.c_str(), "w");
+    std::string filename = "id" + std::to_string(entityId) + "_priv." + keyType;
+
+    BIO* bio = BIO_new_file(filename.c_str(), "r");
     if (!bio) {
-        std::cerr << "Nu s-a putut crea fisierul " << filename << std::endl;
-        return false;
+        std::cerr << "Nu s-a putut deschide fisierul " << filename << std::endl;
+        return nullptr;
     }
 
-    // Pentru OpenSSL 3.0+, folosim PKCS8 pentru toate tipurile de chei
-    // Aceasta este practica recomandata si evita functiile deprecate
-    int result = PEM_write_bio_PKCS8PrivateKey(bio, key, EVP_aes_256_cbc(),
-        password.c_str(), password.length(),
-        nullptr, nullptr);
-
+    EVP_PKEY* key = PEM_read_bio_PrivateKey(bio, NULL, NULL, (void*)password.c_str());
     BIO_free(bio);
 
-    if (result == 1) {
-        std::cout << "Cheie privata salvata: " << filename << std::endl;
-        return true;
-    }
-    return false;
-}
-
-// Salveaza cheia publica
-bool KeyGenerator::savePublicKey(EVP_PKEY* key, const std::string& filename) {
-    BIO* bio = BIO_new_file(filename.c_str(), "w");
-    if (!bio) {
-        std::cerr << "Nu s-a putut crea fisierul " << filename << std::endl;
-        return false;
-    }
-
-    // Pentru OpenSSL 3.0+, folosim aceeasi functie pentru ambele tipuri
-    int result = PEM_write_bio_PUBKEY(bio, key);
-
-    BIO_free(bio);
-
-    if (result == 1) {
-        std::cout << "Cheie publica salvata: " << filename << std::endl;
-        return true;
-    }
-    return false;
-}
-
-// Calculeaza diferenta de timp pana la 050505050505Z
-std::string KeyGenerator::getTimeDifference() {
-    // Data target: 5 Mai 2005, 05:05:05 UTC
-    // Conform cerintelor: 050505050505Z
-    struct tm target_tm = { 0 };
-    target_tm.tm_year = 105;  // 2005 - 1900
-    target_tm.tm_mon = 4;     // Mai (0-indexed, deci 4 pentru mai)
-    target_tm.tm_mday = 5;
-    target_tm.tm_hour = 5;
-    target_tm.tm_min = 5;
-    target_tm.tm_sec = 5;
-
-    // Converteste la UTC time_t
-    time_t target_time = mktime(&target_tm);
-    time_t current_time = time(nullptr);
-
-    // Calculeaza diferenta in secunde
-    long long diff_seconds = static_cast<long long>(difftime(target_time, current_time));
-
-    // Converteste la string
-    std::stringstream ss;
-    ss << abs(diff_seconds);  // Folosim valoarea absoluta
-
-    return ss.str();
-}
-
-// Genereaza cheia MAC folosind PBKDF2 cu SHA3-256
-std::vector<unsigned char> KeyGenerator::generateMACKey() {
-    std::string timeDiff = getTimeDifference();
-    return pbkdf2_sha3_256(timeDiff, PBKDF2_ITERATIONS);
-}
-
-// Implementare PBKDF2 cu SHA3-256
-std::vector<unsigned char> KeyGenerator::pbkdf2_sha3_256(const std::string& input, int iterations) {
-    std::vector<unsigned char> key(32); // SHA3-256 produce 32 bytes
-
-    // Incercam mai intai SHA3-256
-    const EVP_MD* sha3_256 = EVP_sha3_256();
-    if (sha3_256 != nullptr) {
-        int result = PKCS5_PBKDF2_HMAC(input.c_str(), input.length(),
-            nullptr, 0,  // fara salt
-            iterations,
-            sha3_256,
-            key.size(), key.data());
-
-        if (result == 1) {
-            std::cout << "Folosesc SHA3-256 pentru PBKDF2" << std::endl;
-            return key;
-        }
-    }
-
-    // Fallback la SHA256 daca SHA3 nu e disponibil
-    std::cerr << "SHA3-256 nu este disponibil, folosesc SHA256" << std::endl;
-    int result = PKCS5_PBKDF2_HMAC(input.c_str(), input.length(),
-        nullptr, 0,
-        iterations,
-        EVP_sha256(),
-        key.size(), key.data());
-
-    if (result != 1) {
-        std::cerr << "Eroare la derivarea cheii PBKDF2" << std::endl;
+    if (!key) {
+        std::cerr << "Eroare la citirea cheii private din " << filename << std::endl;
     }
 
     return key;
 }
 
-// Genereaza toate cheile pentru o entitate
-bool KeyGenerator::generateAllKeysForEntity(int entityId, const std::string& password) {
-    std::cout << "\n=== Generare chei pentru entitatea " << entityId << " ===" << std::endl;
+// Incarca o cheie publica
+EVP_PKEY* Handshake::loadPublicKey(int entityId, const std::string& keyType) {
+    std::string filename = "id" + std::to_string(entityId) + "_pub." + keyType;
 
-    // Genereaza chei EC
-    if (!generateECKeyPair(entityId, password)) {
+    BIO* bio = BIO_new_file(filename.c_str(), "r");
+    if (!bio) {
+        std::cerr << "Nu s-a putut deschide fisierul " << filename << std::endl;
+        return nullptr;
+    }
+
+    EVP_PKEY* key = PEM_read_bio_PUBKEY(bio, NULL, NULL, NULL);
+    BIO_free(bio);
+
+    if (!key) {
+        std::cerr << "Eroare la citirea cheii publice din " << filename << std::endl;
+    }
+
+    return key;
+}
+
+// Realizeaza schimbul de chei ECDH
+std::vector<unsigned char> Handshake::performECDH(EVP_PKEY* privateKey,
+    EVP_PKEY* publicKey) {
+    std::vector<unsigned char> sharedSecret;
+
+    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new(privateKey, NULL);
+    if (!ctx) {
+        std::cerr << "Eroare la crearea contextului ECDH" << std::endl;
+        return sharedSecret;
+    }
+
+    if (EVP_PKEY_derive_init(ctx) <= 0) {
+        std::cerr << "Eroare la initializarea ECDH" << std::endl;
+        EVP_PKEY_CTX_free(ctx);
+        return sharedSecret;
+    }
+
+    if (EVP_PKEY_derive_set_peer(ctx, publicKey) <= 0) {
+        std::cerr << "Eroare la setarea peer-ului ECDH" << std::endl;
+        EVP_PKEY_CTX_free(ctx);
+        return sharedSecret;
+    }
+
+    // Determina lungimea secretului partajat
+    size_t secretLen;
+    if (EVP_PKEY_derive(ctx, NULL, &secretLen) <= 0) {
+        std::cerr << "Eroare la determinarea lungimii secretului" << std::endl;
+        EVP_PKEY_CTX_free(ctx);
+        return sharedSecret;
+    }
+
+    sharedSecret.resize(secretLen);
+
+    // Deriva secretul partajat
+    if (EVP_PKEY_derive(ctx, sharedSecret.data(), &secretLen) <= 0) {
+        std::cerr << "Eroare la derivarea secretului partajat" << std::endl;
+        sharedSecret.clear();
+    }
+
+    EVP_PKEY_CTX_free(ctx);
+    return sharedSecret;
+}
+
+// Extrage componentele x si y dintr-un punct EC
+bool Handshake::extractECPointComponents(EVP_PKEY* key,
+    std::vector<unsigned char>& x,
+    std::vector<unsigned char>& y) {
+    EC_KEY* ecKey = EVP_PKEY_get1_EC_KEY(key);
+    if (!ecKey) {
+        std::cerr << "Nu s-a putut obtine cheia EC" << std::endl;
         return false;
     }
 
-    // Genereaza MAC pentru cheia EC
-    if (!generateMAC(entityId, "ecc")) {
+    const EC_POINT* publicPoint = EC_KEY_get0_public_key(ecKey);
+    const EC_GROUP* group = EC_KEY_get0_group(ecKey);
+
+    if (!publicPoint || !group) {
+        EC_KEY_free(ecKey);
         return false;
     }
 
-    // Genereaza chei RSA
-    if (!generateRSAKeyPair(entityId, password)) {
+    BIGNUM* xBN = BN_new();
+    BIGNUM* yBN = BN_new();
+
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
+    if (!EC_POINT_get_affine_coordinates_GFp(group, publicPoint, xBN, yBN, NULL)) {
+#else
+    if (!EC_POINT_get_affine_coordinates(group, publicPoint, xBN, yBN, NULL)) {
+#endif
+        BN_free(xBN);
+        BN_free(yBN);
+        EC_KEY_free(ecKey);
         return false;
     }
 
-    // Genereaza MAC pentru cheia RSA
-    if (!generateMAC(entityId, "rsa")) {
-        return false;
+    // Converteste BIGNUM la vector de bytes
+    int xLen = BN_num_bytes(xBN);
+    int yLen = BN_num_bytes(yBN);
+
+    x.resize(xLen);
+    y.resize(yLen);
+
+    BN_bn2bin(xBN, x.data());
+    BN_bn2bin(yBN, y.data());
+
+    BN_free(xBN);
+    BN_free(yBN);
+    EC_KEY_free(ecKey);
+
+    return true;
     }
 
-    std::cout << "Toate cheile au fost generate cu succes pentru entitatea " << entityId << std::endl;
+// Extrage componentele x si y din secretul partajat ECDH
+bool Handshake::extractECDHSharedSecretComponents(const std::vector<unsigned char>&sharedSecret,
+    std::vector<unsigned char>&x,
+    std::vector<unsigned char>&y) {
+    // Pentru P-256, secretul partajat este coordonata x a punctului rezultat
+    // Are 32 bytes pentru P-256
+
+    if (sharedSecret.size() != 32) {
+        std::cerr << "Dimensiune invalida pentru secretul partajat: " << sharedSecret.size() << std::endl;
+        // Pentru compatibilitate, impartim secretul in doua jumatati
+        size_t halfLen = sharedSecret.size() / 2;
+        x.assign(sharedSecret.begin(), sharedSecret.begin() + halfLen);
+        y.assign(sharedSecret.begin() + halfLen, sharedSecret.end());
+        return true;
+    }
+
+    // Pentru ECDH standard, secretul partajat este doar coordonata x
+    x = sharedSecret;
+
+    // Pentru y, vom folosi un hash al lui x
+    y.resize(32);
+    SHA256(x.data(), x.size(), y.data());
+
     return true;
 }
 
-// Functii pentru nume de fisiere
-std::string KeyGenerator::getPrivateKeyFilename(int entityId, const std::string& keyType) {
-    return "id" + std::to_string(entityId) + "_priv." + keyType;
+// Deriveaza cheia simetrica conform cerintelor
+Handshake::SymmetricElements Handshake::deriveSymmetricKey(
+    const std::vector<unsigned char>&sharedSecret) {
+    SymmetricElements elements;
+
+    // Extrage componentele x si y din secretul partajat
+    std::vector<unsigned char> x, y;
+    extractECDHSharedSecretComponents(sharedSecret, x, y);
+
+    // Deriva SymLeft si SymRight
+    std::vector<unsigned char> symLeft = deriveSymLeft(x);
+    std::vector<unsigned char> symRight = deriveSymRight(y);
+
+    // SymKey = SymLeft XOR First_16_bytes(SymRight)
+    std::vector<unsigned char> first16(symRight.begin(), symRight.begin() + 16);
+    elements.symKey = xorVectors(symLeft, first16);
+
+    // Restul octetilor din SymRight sunt folositi pentru IV si alte elemente
+    if (symRight.size() > 16) {
+        elements.iv = std::vector<unsigned char>(symRight.begin() + 16,
+            symRight.begin() + 32);
+    }
+    else {
+        // Genereaza IV daca nu sunt suficienti octeti
+        elements.iv = generateIV();
+    }
+
+    // Asiguram ca cheia are exact 16 bytes pentru AES-128
+    if (elements.symKey.size() > 16) {
+        elements.symKey.resize(16);
+    }
+
+    return elements;
 }
 
-std::string KeyGenerator::getPublicKeyFilename(int entityId, const std::string& keyType) {
-    return "id" + std::to_string(entityId) + "_pub." + keyType;
+// Deriveaza SymLeft aplicand SHA-256 si XOR
+std::vector<unsigned char> Handshake::deriveSymLeft(const std::vector<unsigned char>&x) {
+    // Aplica SHA-256 peste x
+    std::vector<unsigned char> hash(SHA256_DIGEST_LENGTH);
+    SHA256(x.data(), x.size(), hash.data());
+
+    // Imparte in 2 elemente de 16 octeti si face XOR
+    std::vector<unsigned char> part1(hash.begin(), hash.begin() + 16);
+    std::vector<unsigned char> part2(hash.begin() + 16, hash.end());
+
+    return xorVectors(part1, part2);
 }
 
-std::string KeyGenerator::getMACFilename(int entityId, const std::string& keyType) {
-    return "id" + std::to_string(entityId) + "_" + keyType + ".mac";
+// Deriveaza SymRight folosind PBKDF2 cu SHA-384
+std::vector<unsigned char> Handshake::deriveSymRight(const std::vector<unsigned char>&y) {
+    std::vector<unsigned char> key(48); // SHA-384 produce 48 bytes
+
+    // PBKDF2 cu SHA-384, fara salt
+    int result = PKCS5_PBKDF2_HMAC(
+        reinterpret_cast<const char*>(y.data()), y.size(),
+        nullptr, 0,  // fara salt
+        10000,       // iteratii
+        EVP_sha384(),
+        key.size(), key.data()
+    );
+
+    if (result != 1) {
+        std::cerr << "Eroare la derivarea SymRight" << std::endl;
+    }
+
+    return key;
 }
 
-// Genereaza si salveaza MAC-ul pentru o cheie publica
-bool KeyGenerator::generateMAC(int entityId, const std::string& keyType) {
-    std::cout << "Generare MAC pentru cheia " << keyType << " a entitatii " << entityId << std::endl;
+// Salveaza elementele simetrice in format DER codat Base64
+bool Handshake::saveSymmetricElements(const SymmetricElements & elements,
+    int entityId1, int entityId2) {
+    // Genereaza nume de fisier
+    std::string filename1 = getSymmetricElementsFilename(entityId1);
+    std::string filename2 = getSymmetricElementsFilename(entityId2);
+
+    // Creeaza structura DER
+    // SymElements := Sequence {
+    //   SymElementsID: Integer
+    //   SymKey: OCTET STRING
+    //   IV: OCTET STRING
+    // }
+
+    std::vector<unsigned char> der;
+
+    // SEQUENCE tag
+    der.push_back(0x30);
+    size_t seqLenPos = der.size();
+    der.push_back(0); // placeholder pentru lungime
+
+    // SymElementsID - INTEGER
+    der.push_back(0x02); // INTEGER tag
+
+    // Encode integer value
+    std::vector<unsigned char> idBytes;
+    int id = elements.symElementsId;
+    while (id > 0) {
+        idBytes.insert(idBytes.begin(), id & 0xFF);
+        id >>= 8;
+    }
+    if (idBytes.empty()) idBytes.push_back(0);
+
+    der.push_back(idBytes.size());
+    der.insert(der.end(), idBytes.begin(), idBytes.end());
+
+    // SymKey - OCTET STRING
+    der.push_back(0x04);
+    der.push_back(elements.symKey.size());
+    der.insert(der.end(), elements.symKey.begin(), elements.symKey.end());
+
+    // IV - OCTET STRING
+    der.push_back(0x04);
+    der.push_back(elements.iv.size());
+    der.insert(der.end(), elements.iv.begin(), elements.iv.end());
+
+    // Actualizeaza lungimea
+    size_t totalLen = der.size() - seqLenPos - 1;
+    der[seqLenPos] = totalLen;
+
+    // Codeaza in Base64
+    BIO* b64 = BIO_new(BIO_f_base64());
+    BIO* mem = BIO_new(BIO_s_mem());
+    BIO_push(b64, mem);
+
+    BIO_write(b64, der.data(), der.size());
+    BIO_flush(b64);
+
+    BUF_MEM* bptr;
+    BIO_get_mem_ptr(b64, &bptr);
+
+    std::string base64Data(bptr->data, bptr->length);
+
+    BIO_free_all(b64);
+
+    // Salveaza in fisiere
+    std::ofstream file1(filename1);
+    std::ofstream file2(filename2);
+
+    if (!file1 || !file2) {
+        std::cerr << "Eroare la crearea fisierelor de elemente simetrice" << std::endl;
+        return false;
+    }
+
+    file1 << base64Data;
+    file2 << base64Data;
+
+    file1.close();
+    file2.close();
+
+    std::cout << "Elemente simetrice salvate: " << filename1 << ", " << filename2 << std::endl;
+    return true;
+}
+
+// Verifica MAC-ul unei chei
+bool Handshake::verifyMAC(int entityId, const std::string & keyType) {
+    std::cout << "Verificare MAC pentru cheia " << keyType << " a entitatii " << entityId << std::endl;
 
     // 1. Citeste cheia publica
-    std::string publicKeyFile = getPublicKeyFilename(entityId, keyType);
-
-    // Citeste continutul cheii publice
+    std::string publicKeyFile = "id" + std::to_string(entityId) + "_pub." + keyType;
     std::ifstream keyFile(publicKeyFile, std::ios::binary);
     if (!keyFile) {
         std::cerr << "Nu s-a putut deschide fisierul " << publicKeyFile << std::endl;
-        Logger::getInstance()->logAction(entityId, Logger::ERROR,
-            "Eroare la deschiderea fisierului " + publicKeyFile);
         return false;
     }
 
@@ -321,26 +441,131 @@ bool KeyGenerator::generateMAC(int entityId, const std::string& keyType) {
         std::istreambuf_iterator<char>());
     keyFile.close();
 
-    // 2. Genereaza cheia MAC
-    std::vector<unsigned char> macKey = generateMACKey();
-
-    // 3. Calculeaza GMAC
-    std::vector<unsigned char> macValue = calculateMAC(keyContent, macKey);
-
-    // 4. Salveaza in format DER
-    bool success = saveMACToFile(entityId, keyType, macValue);
-
-    if (success) {
-        Logger::getInstance()->logAction(entityId, Logger::MAC_GENERATION,
-            "MAC generat pentru cheia " + keyType);
+    // 2. Citeste MAC-ul salvat
+    std::string macFile = "id" + std::to_string(entityId) + "_" + keyType + ".mac";
+    std::ifstream macFileIn(macFile, std::ios::binary);
+    if (!macFileIn) {
+        std::cerr << "Nu s-a putut deschide fisierul " << macFile << std::endl;
+        return false;
     }
 
-    return success;
+    // Citeste tot continutul DER
+    std::vector<unsigned char> derContent((std::istreambuf_iterator<char>(macFileIn)),
+        std::istreambuf_iterator<char>());
+    macFileIn.close();
+
+    // 3. Parseaza DER pentru a extrage MAC-ul salvat si cheia MAC
+    std::vector<unsigned char> storedMacValue;
+    std::vector<unsigned char> storedMacKey;
+
+    // Parsare simplificata DER
+    size_t pos = 0;
+
+    if (pos >= derContent.size() || derContent[pos] != 0x30) {
+        std::cerr << "Format DER invalid - nu incepe cu SEQUENCE" << std::endl;
+        return false;
+    }
+    pos++; // Tag SEQUENCE
+
+    // Lungimea secventei
+    size_t seqLen = derContent[pos++];
+    if (seqLen > 127) {
+        // Long form
+        seqLen = derContent[pos++];
+    }
+
+    // PubKeyName - PrintableString
+    if (pos >= derContent.size() || derContent[pos] != 0x13) {
+        std::cerr << "Format DER invalid - nu gasesc PrintableString" << std::endl;
+        return false;
+    }
+    pos++; // Tag PrintableString
+    size_t nameLen = derContent[pos++];
+    pos += nameLen; // Sari peste nume
+
+    // MACKey - OCTET STRING
+    if (pos >= derContent.size() || derContent[pos] != 0x04) {
+        std::cerr << "Format DER invalid - nu gasesc MACKey" << std::endl;
+        return false;
+    }
+    pos++; // tag OCTET STRING
+    size_t keyLen = derContent[pos++];
+    if (keyLen > 127) {
+        // Long form
+        keyLen = derContent[pos++];
+    }
+
+    if (pos + keyLen > derContent.size()) {
+        std::cerr << "Format DER invalid - MACKey depaseste limitele" << std::endl;
+        return false;
+    }
+
+    storedMacKey.assign(derContent.begin() + pos, derContent.begin() + pos + keyLen);
+    pos += keyLen;
+
+    // MACValue - OCTET STRING  
+    if (pos >= derContent.size() || derContent[pos] != 0x04) {
+        std::cerr << "Format DER invalid - nu gasesc MACValue" << std::endl;
+        return false;
+    }
+    pos++; // tag OCTET STRING
+    size_t valueLen = derContent[pos++];
+
+    if (pos + valueLen > derContent.size()) {
+        std::cerr << "Format DER invalid - MACValue depaseste limitele" << std::endl;
+        return false;
+    }
+
+    storedMacValue.assign(derContent.begin() + pos, derContent.begin() + pos + valueLen);
+
+    // 4. Recalculeaza MAC-ul folosind cheia MAC din DER
+    std::vector<unsigned char> calculatedMac = calculateMAC(keyContent, storedMacKey);
+
+    // 5. Debug - afiseaza valorile
+    std::cout << "Lungime cheie MAC stocata: " << storedMacKey.size() << std::endl;
+    std::cout << "Lungime MAC stocat: " << storedMacValue.size() << std::endl;
+    std::cout << "Lungime MAC calculat: " << calculatedMac.size() << std::endl;
+
+    // 6. Compara valorile
+    if (calculatedMac.size() != storedMacValue.size()) {
+        std::cerr << "Dimensiuni diferite de MAC!" << std::endl;
+        return false;
+    }
+
+    bool valid = true;
+    for (size_t i = 0; i < calculatedMac.size(); i++) {
+        if (calculatedMac[i] != storedMacValue[i]) {
+            valid = false;
+            break;
+        }
+    }
+
+    if (valid) {
+        std::cout << "MAC valid pentru cheia " << keyType << " a entitatii " << entityId << std::endl;
+    }
+    else {
+        std::cerr << "MAC invalid pentru cheia " << keyType << " a entitatii " << entityId << std::endl;
+
+        // Debug - afiseaza primii 8 bytes
+        std::cout << "MAC stocat (primii 8 bytes): ";
+        for (size_t i = 0; i < 8 && i < storedMacValue.size(); i++) {
+            std::cout << std::hex << (int)storedMacValue[i] << " ";
+        }
+        std::cout << std::dec << std::endl;
+
+        std::cout << "MAC calculat (primii 8 bytes): ";
+        for (size_t i = 0; i < 8 && i < calculatedMac.size(); i++) {
+            std::cout << std::hex << (int)calculatedMac[i] << " ";
+        }
+        std::cout << std::dec << std::endl;
+    }
+
+    return valid;
 }
 
 // Calculeaza MAC folosind GMAC (AES-GCM authentication tag)
-std::vector<unsigned char> KeyGenerator::calculateMAC(const std::string& data,
-    const std::vector<unsigned char>& key) {
+std::vector<unsigned char> Handshake::calculateMAC(const std::string & data,
+    const std::vector<unsigned char>&key) {
     std::vector<unsigned char> mac(16); // GMAC produce 16 bytes
 
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
@@ -388,7 +613,7 @@ std::vector<unsigned char> KeyGenerator::calculateMAC(const std::string& data,
         return mac;
     }
 
-    // Finalizam fara a cripta nimic (doar calculam MAC-ul) 
+    // Finalizam fara a cripta nimic (doar calculam MAC-ul)
     unsigned char dummy[1];
     if (EVP_EncryptFinal_ex(ctx, dummy, &len) != 1) {
         EVP_CIPHER_CTX_free(ctx);
@@ -406,74 +631,86 @@ std::vector<unsigned char> KeyGenerator::calculateMAC(const std::string& data,
     return mac;
 }
 
-// Salveaza MAC-ul in format DER
-bool KeyGenerator::saveMACToFile(int entityId, const std::string& keyType,
-    const std::vector<unsigned char>& macValue) {
-    std::string filename = getMACFilename(entityId, keyType);
-    std::string pubKeyName = getPublicKeyFilename(entityId, keyType);
+// Calculeaza diferenta de timp pana la 050505050505Z
+std::string Handshake::getTimeDifference() {
+    // Data target: 5 Mai 2005, 05:05:05 UTC  
+    struct tm target_tm = { 0 };
+    target_tm.tm_year = 105;  // 2005 - 1900
+    target_tm.tm_mon = 4;     // Mai (0-indexed, deci 4 pentru mai)
+    target_tm.tm_mday = 5;
+    target_tm.tm_hour = 5;
+    target_tm.tm_min = 5;
+    target_tm.tm_sec = 5;
 
-    // Obtine cheia MAC actuala pentru salvare
-    std::vector<unsigned char> macKey = generateMACKey();
+    // Converteste la UTC time_t
+    time_t target_time = mktime(&target_tm);
+    time_t current_time = time(nullptr);
 
-    // Creeaza structura ASN.1 pentru MAC
-    // PubKeyMAC := Sequence {
-    //   PubKeyName: PrintableString
-    //   MACKey: OCTET STRING
-    //   MACValue: OCTET STRING
-    // }
+    // Calculeaza diferenta in secunde
+    long long diff_seconds = static_cast<long long>(difftime(target_time, current_time));
 
-    std::ofstream file(filename, std::ios::binary);
-    if (!file) {
-        std::cerr << "Nu s-a putut crea fisierul " << filename << std::endl;
-        return false;
+    // Converteste la string
+    std::stringstream ss;
+    ss << abs(diff_seconds);  // Folosim valoarea absoluta
+
+    return ss.str();
+}
+
+// Implementare PBKDF2 cu SHA3-256
+std::vector<unsigned char> Handshake::pbkdf2_sha3_256(const std::string & input, int iterations) {
+    std::vector<unsigned char> key(32); // SHA3-256 produce 32 bytes
+
+    // Incercam mai intai SHA3-256
+    const EVP_MD* sha3_256 = EVP_sha3_256();
+    if (sha3_256 != nullptr) {
+        int result = PKCS5_PBKDF2_HMAC(input.c_str(), input.length(),
+            nullptr, 0,  // fara salt
+            iterations,
+            sha3_256,
+            key.size(), key.data());
+
+        if (result == 1) {
+            std::cout << "Folosesc SHA3-256 pentru PBKDF2" << std::endl;
+            return key;
+        }
     }
 
-    // Scriem manual DER pentru simplitate
-    std::vector<unsigned char> der;
+    // Fallback la SHA256 daca SHA3 nu e disponibil
+    std::cerr << "SHA3-256 nu este disponibil, folosesc SHA256" << std::endl;
+    int result = PKCS5_PBKDF2_HMAC(input.c_str(), input.length(),
+        nullptr, 0,
+        iterations,
+        EVP_sha256(),
+        key.size(), key.data());
 
-    // SEQUENCE tag
-    der.push_back(0x30); // SEQUENCE
-
-    // Calculam lungimea totala (o vom completa mai tarziu)
-    size_t seqLenPos = der.size();
-    der.push_back(0); // placeholder pentru lungime
-
-    // PubKeyName - PrintableString
-    der.push_back(0x13); // PrintableString tag
-    der.push_back(pubKeyName.length());
-    der.insert(der.end(), pubKeyName.begin(), pubKeyName.end());
-
-    // MACKey - OCTET STRING
-    der.push_back(0x04); // OCTET STRING tag
-    if (macKey.size() < 128) {
-        der.push_back(macKey.size());
-    }
-    else {
-        der.push_back(0x81); // long form
-        der.push_back(macKey.size());
-    }
-    der.insert(der.end(), macKey.begin(), macKey.end());
-
-    // MACValue - OCTET STRING
-    der.push_back(0x04); // OCTET STRING tag
-    der.push_back(macValue.size());
-    der.insert(der.end(), macValue.begin(), macValue.end());
-
-    // Actualizam lungimea secventei
-    size_t totalLen = der.size() - seqLenPos - 1;
-    if (totalLen < 128) {
-        der[seqLenPos] = totalLen;
-    }
-    else {
-        // Pentru lungimi mari, folosim forma lunga
-        der[seqLenPos] = 0x81;
-        der.insert(der.begin() + seqLenPos + 1, totalLen);
+    if (result != 1) {
+        std::cerr << "Eroare la derivarea cheii PBKDF2" << std::endl;
     }
 
-    // Scriem in fisier
-    file.write(reinterpret_cast<const char*>(der.data()), der.size());
-    file.close();
+    return key;
+}
 
-    std::cout << "MAC salvat: " << filename << std::endl;
-    return true;
+// Nume fisier pentru elemente simetrice
+std::string Handshake::getSymmetricElementsFilename(int entityId) {
+    return "id" + std::to_string(entityId) + ".sym";
+}
+
+// XOR intre doi vectori
+std::vector<unsigned char> Handshake::xorVectors(const std::vector<unsigned char>&a,
+    const std::vector<unsigned char>&b) {
+    size_t len = std::min(a.size(), b.size());
+    std::vector<unsigned char> result(len);
+
+    for (size_t i = 0; i < len; i++) {
+        result[i] = a[i] ^ b[i];
+    }
+
+    return result;
+}
+
+// Genereaza un IV random pentru AES
+std::vector<unsigned char> Handshake::generateIV() {
+    std::vector<unsigned char> iv(16); // AES block size
+    RAND_bytes(iv.data(), iv.size());
+    return iv;
 }
