@@ -1,0 +1,7 @@
+2
+1 pass1 
+2 pass2
+3
+1/1/2/msg1/mesaj 1
+2/1/2/msg2 catre id1/mesajul numarul 2
+3/2/1/msg1/mesajul 1 din partea entității cu id2
