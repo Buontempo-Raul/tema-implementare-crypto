@@ -16,7 +16,12 @@
 #include "Logger.h"
 
 // Pentru compatibilitate cu OpenSSL 3.0+
+#ifdef OPENSSL_VERSION_MAJOR
+#if OPENSSL_VERSION_MAJOR >= 3
 #define OPENSSL_SUPPRESS_DEPRECATED
+#pragma warning(disable : 4996)
+#endif
+#endif
 
 // Constructor
 KeyGenerator::KeyGenerator() {

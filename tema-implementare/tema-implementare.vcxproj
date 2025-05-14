@@ -131,12 +131,18 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="FileParser.cpp" />
+    <ClCompile Include="Handshake.cpp" />
     <ClCompile Include="KeyGenerator.cpp" />
+    <ClCompile Include="Logger.cpp" />
     <ClCompile Include="Source.cpp" />
+    <ClCompile Include="TransactionManager.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="FileParser.h" />
+    <ClInclude Include="Handshake.h" />
     <ClInclude Include="KeyGenerator.h" />
+    <ClInclude Include="Logger.h" />
+    <ClInclude Include="TransactionManager.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

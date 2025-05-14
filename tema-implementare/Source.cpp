@@ -1,6 +1,8 @@
 #include <iostream>
 #include "FileParser.h"
 #include "KeyGenerator.h"
+#include "Handshake.h"
+#include "TransactionManager.h"
 
 int main(int argc, char* argv[]) {
     std::string testFile = "test.txt";
@@ -51,6 +53,70 @@ int main(int argc, char* argv[]) {
         std::cout << "  - id" << entity.id << "_ecc.mac (MAC pentru cheie EC)" << std::endl;
         std::cout << "  - id" << entity.id << "_rsa.mac (MAC pentru cheie RSA)" << std::endl;
     }
+
+    std::cout << "\n=== Realizare handshake intre entitati ===" << std::endl;
+
+    // Creaza obiect pentru handshake
+    Handshake handshake;
+
+    // Pentru fiecare pereche unica de entitati, realizeaza handshake
+    for (size_t i = 0; i < entities.size(); i++) {
+        for (size_t j = i + 1; j < entities.size(); j++) {
+            if (!handshake.performHandshake(entities[i].id, entities[j].id,
+                entities[i].password, entities[j].password)) {
+                std::cerr << "Eroare la handshake intre entitatea " << entities[i].id
+                    << " si entitatea " << entities[j].id << std::endl;
+                return 1;
+            }
+        }
+    }
+
+    std::cout << "\n=== Handshake-uri realizate cu succes! ===" << std::endl;
+    std::cout << "\nFisiere suplimentare generate:" << std::endl;
+
+    // Afiseaza fisierele de elemente simetrice
+    for (const auto& entity : entities) {
+        std::cout << "  - id" << entity.id << ".sym (elemente simetrice)" << std::endl;
+    }
+
+    std::cout << "\n=== Procesare tranzactii ===" << std::endl;
+
+    // Creaza manager pentru tranzactii
+    TransactionManager transactionManager;
+
+    // Proceseaza tranzactiile din fisier
+    const auto& transactions = parser.getTransactions();
+    for (const auto& transaction : transactions) {
+        // Gaseste parola expeditorului
+        std::string senderPassword;
+        for (const auto& entity : entities) {
+            if (entity.id == transaction.senderId) {
+                senderPassword = entity.password;
+                break;
+            }
+        }
+
+        if (!transactionManager.processTransaction(transaction.transactionId,
+            transaction.senderId,
+            transaction.receiverId,
+            transaction.subject,
+            transaction.message,
+            senderPassword)) {
+            std::cerr << "Eroare la procesarea tranzactiei " << transaction.transactionId << std::endl;
+            return 1;
+        }
+    }
+
+    std::cout << "\n=== Toate tranzactiile au fost procesate cu succes! ===" << std::endl;
+    std::cout << "\nFisiere de tranzactii generate:" << std::endl;
+
+    // Afiseaza fisierele de tranzactii
+    for (const auto& transaction : transactions) {
+        std::cout << "  - id" << transaction.senderId << "_id" << transaction.receiverId
+            << "_tr" << transaction.transactionId << ".trx" << std::endl;
+    }
+
+    std::cout << "\n=== Aplicatie finalizata cu succes! ===" << std::endl;
 
     return 0;
 }
