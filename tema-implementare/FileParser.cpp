@@ -15,22 +15,18 @@ bool FileParser::parse() {
 
     int entityCount, transactionCount;
 
-    // Citeste numarul de entitati
     file >> entityCount;
     file.ignore();
 
-    // Citeste entitatile
     for (int i = 0; i < entityCount; i++) {
         Entity entity;
         file >> entity.id >> entity.password;
         entities.push_back(entity);
     }
 
-    // Citeste numarul de tranzactii
     file >> transactionCount;
     file.ignore();
 
-    // Citeste tranzactiile
     std::string line;
     for (int i = 0; i < transactionCount; i++) {
         std::getline(file, line);
@@ -42,7 +38,6 @@ bool FileParser::parse() {
         transaction.receiverId = std::stoi(parts[2]);
         transaction.subject = parts[3];
 
-        // Concateneaza restul pentru mesaj (daca contine '/')
         transaction.message = "";
         for (size_t j = 4; j < parts.size(); j++) {
             if (j > 4) transaction.message += "/";

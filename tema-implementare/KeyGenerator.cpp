@@ -27,25 +27,21 @@ KeyGenerator::~KeyGenerator() {
 bool KeyGenerator::generateAllKeys(int entityId, const std::string& password) {
     std::cout << "\nGenerare chei pentru entitatea " << entityId << std::endl;
 
-    // 1. Genereaza chei EC
     if (!generateECKeys(entityId, password)) {
         std::cerr << "Eroare la generarea cheilor EC!" << std::endl;
         return false;
     }
 
-    // 2. Genereaza MAC pentru EC
     if (!generateMAC(entityId, "ecc")) {
         std::cerr << "Eroare la generarea MAC pentru EC!" << std::endl;
         return false;
     }
 
-    // 3. Genereaza chei RSA
     if (!generateRSAKeys(entityId, password)) {
         std::cerr << "Eroare la generarea cheilor RSA!" << std::endl;
         return false;
     }
 
-    // 4. Genereaza MAC pentru RSA
     if (!generateMAC(entityId, "rsa")) {
         std::cerr << "Eroare la generarea MAC pentru RSA!" << std::endl;
         return false;
@@ -165,7 +161,6 @@ bool KeyGenerator::savePublicKey(EVP_PKEY* key, const std::string& filename) {
 bool KeyGenerator::generateMAC(int entityId, const std::string& keyType) {
     std::cout << "Generare MAC pentru " << keyType << std::endl;
 
-    // Citeste cheia publica
     std::string publicKeyFile = getPublicKeyFile(entityId, keyType);
     std::ifstream keyFile(publicKeyFile, std::ios::binary);
     if (!keyFile) {
@@ -176,13 +171,10 @@ bool KeyGenerator::generateMAC(int entityId, const std::string& keyType) {
         std::istreambuf_iterator<char>());
     keyFile.close();
 
-    // Genereaza cheia MAC
     std::vector<unsigned char> macKey = generateMACKey();
 
-    // Calculeaza MAC
     std::vector<unsigned char> macValue = calculateMAC(keyContent, macKey);
 
-    // Salveaza MAC
     bool success = saveMACToFile(entityId, keyType, macValue);
 
     if (success) {
@@ -210,7 +202,6 @@ std::vector<unsigned char> KeyGenerator::calculateMAC(const std::string& data,
     const std::vector<unsigned char>& key) {
     std::vector<unsigned char> mac(16);  // GMAC are 16 bytes
 
-    // Ajustam cheia la 16 bytes pentru AES-128
     std::vector<unsigned char> aesKey(16);
     if (key.size() >= 16) {
         std::copy(key.begin(), key.begin() + 16, aesKey.begin());
@@ -219,29 +210,23 @@ std::vector<unsigned char> KeyGenerator::calculateMAC(const std::string& data,
         std::copy(key.begin(), key.end(), aesKey.begin());
     }
 
-    // Simplificat: folosim AES-128-GCM pentru GMAC
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
     if (!ctx) return mac;
 
-    // Initializam cu AES-128-GCM
     EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), NULL, NULL, NULL);
     EVP_EncryptInit_ex(ctx, NULL, NULL, aesKey.data(), NULL);
 
-    // IV zero
     unsigned char iv[12] = { 0 };
     EVP_EncryptInit_ex(ctx, NULL, NULL, NULL, iv);
 
-    // Adaugam datele ca AAD
     int len;
     EVP_EncryptUpdate(ctx, NULL, &len,
         reinterpret_cast<const unsigned char*>(data.c_str()),
         data.length());
 
-    // Finalizam
     unsigned char dummy[1];
     EVP_EncryptFinal_ex(ctx, dummy, &len);
 
-    // Obtinem tag-ul
     EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, mac.data());
 
     EVP_CIPHER_CTX_free(ctx);
@@ -257,30 +242,24 @@ bool KeyGenerator::saveMACToFile(int entityId, const std::string& keyType,
     std::ofstream file(filename, std::ios::binary);
     if (!file) return false;
 
-    // Construim DER simplu
     std::vector<unsigned char> der;
 
-    // SEQUENCE tag
     der.push_back(0x30);
     size_t seqLenPos = der.size();
     der.push_back(0);  // placeholder pentru lungime
 
-    // PubKeyName - PrintableString
     der.push_back(0x13);
     der.push_back(pubKeyName.length());
     der.insert(der.end(), pubKeyName.begin(), pubKeyName.end());
 
-    // MACKey - OCTET STRING
     der.push_back(0x04);
     der.push_back(macKey.size());
     der.insert(der.end(), macKey.begin(), macKey.end());
 
-    // MACValue - OCTET STRING
     der.push_back(0x04);
     der.push_back(macValue.size());
     der.insert(der.end(), macValue.begin(), macValue.end());
 
-    // Actualizam lungimea
     der[seqLenPos] = der.size() - seqLenPos - 1;
 
     file.write(reinterpret_cast<const char*>(der.data()), der.size());
@@ -291,7 +270,6 @@ bool KeyGenerator::saveMACToFile(int entityId, const std::string& keyType,
 }
 
 std::string KeyGenerator::getTimeDifference() {
-    // Data target: 5 Mai 2005, 05:05:05
     struct tm target_tm = { 0 };
     target_tm.tm_year = 105;  // 2005 - 1900
     target_tm.tm_mon = 4;     // Mai

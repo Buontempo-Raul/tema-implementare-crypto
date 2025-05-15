@@ -11,7 +11,7 @@ public:
     void log(int entityId, const std::string& action);
 
 private:
-    Logger();  // Constructor privat pentru Singleton
+    Logger();
     ~Logger();
 
     static Logger* instance;
@@ -21,4 +21,4 @@ private:
     std::string getCurrentTime();
 };
 
-#endif // LOGGER_H
+#endif

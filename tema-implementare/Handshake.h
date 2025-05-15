@@ -10,20 +10,21 @@ public:
     Handshake();
     ~Handshake();
 
-    // Metoda principala
     bool performHandshake(int entityId1, int entityId2,
         const std::string& password1,
         const std::string& password2);
 
+    bool generateSymmetricElementsForTransaction(int transactionId,
+        int senderId, int receiverId,
+        const std::string& senderPassword);
+
 private:
-    // Structura pentru elementele simetrice
     struct SymmetricElements {
         std::vector<unsigned char> symKey;
         std::vector<unsigned char> iv;
         int symElementsId;
     };
 
-    // Metode auxiliare
     bool verifyMAC(int entityId, const std::string& keyType);
 
     EVP_PKEY* loadPrivateKey(int entityId, const std::string& keyType,
@@ -35,7 +36,6 @@ private:
     SymmetricElements deriveSymmetricKey(const std::vector<unsigned char>& sharedSecret);
     bool saveSymmetricElements(const SymmetricElements& elements, int entityId);
 
-    // Utilitare
     std::vector<unsigned char> sha256(const std::vector<unsigned char>& data);
     std::vector<unsigned char> pbkdf2_sha384(const std::vector<unsigned char>& data);
     std::vector<unsigned char> xorBytes(const std::vector<unsigned char>& a,
@@ -43,4 +43,4 @@ private:
     std::vector<unsigned char> generateIV();
 };
 
-#endif // HANDSHAKE_H
+#endif 

@@ -27,31 +27,25 @@ bool TransactionManager::processTransaction(int transactionId, int senderId, int
 
     Logger::getInstance()->log(senderId, "Initiere tranzactie " + std::to_string(transactionId));
 
-    // 1. Incarca elementele simetrice
-    SymmetricElements symElements = loadSymmetricElements(senderId);
+    SymmetricElements symElements = loadSymmetricElements(transactionId);
     if (symElements.symKey.empty() || symElements.iv.empty()) {
-        std::cerr << "Eroare la incarcarea elementelor simetrice!" << std::endl;
+        std::cerr << "Eroare la incarcarea elementelor simetrice pentru tranzactia " << transactionId << std::endl;
         return false;
     }
 
-    // 2. Cripteaza mesajul
     std::vector<unsigned char> encryptedData = encryptFancyOFB(message,
         symElements.symKey,
         symElements.iv);
 
-    // 3. Creeaza datele pentru semnare
-    std::stringstream dataToSign;
-    dataToSign << transactionId << subject << senderId << receiverId << symElements.symElementsId;
-    dataToSign.write(reinterpret_cast<const char*>(encryptedData.data()), encryptedData.size());
+    std::vector<unsigned char> derDataToSign = createTransactionToSignDER(
+        transactionId, subject, senderId, receiverId, symElements.symElementsId, encryptedData);
 
-    // 4. Semneaza
-    std::vector<unsigned char> signature = signWithRSA(dataToSign.str(), senderId, senderPassword);
+    std::vector<unsigned char> signature = signWithRSA(derDataToSign, senderId, senderPassword);
     if (signature.empty()) {
         std::cerr << "Eroare la semnare!" << std::endl;
         return false;
     }
 
-    // 5. Creeaza structura tranzactiei
     TransactionData transaction;
     transaction.transactionId = transactionId;
     transaction.subject = subject;
@@ -61,7 +55,6 @@ bool TransactionManager::processTransaction(int transactionId, int senderId, int
     transaction.encryptedData = encryptedData;
     transaction.signature = signature;
 
-    // 6. Salveaza tranzactia
     if (!saveTransaction(transaction)) {
         std::cerr << "Eroare la salvarea tranzactiei!" << std::endl;
         return false;
@@ -74,17 +67,112 @@ bool TransactionManager::processTransaction(int transactionId, int senderId, int
     return true;
 }
 
+std::vector<unsigned char> TransactionManager::createTransactionToSignDER(
+    int transactionId, const std::string& subject, int senderId, int receiverId,
+    int symElementsId, const std::vector<unsigned char>& encryptedData) {
+
+    std::vector<unsigned char> der;
+
+    der.push_back(0x30);
+    size_t seqLenPos = der.size();
+    der.push_back(0); 
+
+    der.push_back(0x02);
+    std::vector<unsigned char> idBytes = encodeInteger(transactionId);
+    der.push_back(idBytes.size());
+    der.insert(der.end(), idBytes.begin(), idBytes.end());
+
+    der.push_back(0x13);
+    der.push_back(subject.length());
+    der.insert(der.end(), subject.begin(), subject.end());
+
+    der.push_back(0x02);
+    idBytes = encodeInteger(senderId);
+    der.push_back(idBytes.size());
+    der.insert(der.end(), idBytes.begin(), idBytes.end());
+
+    der.push_back(0x02);
+    idBytes = encodeInteger(receiverId);
+    der.push_back(idBytes.size());
+    der.insert(der.end(), idBytes.begin(), idBytes.end());
+
+    der.push_back(0x02);
+    idBytes = encodeInteger(symElementsId);
+    der.push_back(idBytes.size());
+    der.insert(der.end(), idBytes.begin(), idBytes.end());
+
+    encodeLengthAndData(der, 0x04, encryptedData);
+    updateSequenceLength(der, seqLenPos);
+    return der;
+}
+
+std::vector<unsigned char> TransactionManager::encodeInteger(int value) {
+    std::vector<unsigned char> bytes;
+
+    if (value == 0) {
+        bytes.push_back(0);
+        return bytes;
+    }
+
+    while (value > 0) {
+        bytes.insert(bytes.begin(), value & 0xFF);
+        value >>= 8;
+    }
+
+    if (bytes[0] & 0x80) {
+        bytes.insert(bytes.begin(), 0);
+    }
+
+    return bytes;
+}
+
+void TransactionManager::encodeLengthAndData(std::vector<unsigned char>& der,
+    unsigned char tag, const std::vector<unsigned char>& data) {
+    der.push_back(tag);
+
+    size_t dataLen = data.size();
+    if (dataLen < 128) {
+        der.push_back(dataLen);
+    }
+    else if (dataLen < 256) {
+        der.push_back(0x81);
+        der.push_back(dataLen);
+    }
+    else {
+        der.push_back(0x82);
+        der.push_back((dataLen >> 8) & 0xFF);
+        der.push_back(dataLen & 0xFF);
+    }
+
+    der.insert(der.end(), data.begin(), data.end());
+}
+
+void TransactionManager::updateSequenceLength(std::vector<unsigned char>& der, size_t lenPos) {
+    size_t totalLen = der.size() - lenPos - 1;
+
+    if (totalLen < 128) {
+        der[lenPos] = totalLen;
+    }
+    else if (totalLen < 256) {
+        der[lenPos] = 0x81;
+        der.insert(der.begin() + lenPos + 1, totalLen);
+    }
+    else {
+        der[lenPos] = 0x82;
+        der.insert(der.begin() + lenPos + 1, (totalLen >> 8) & 0xFF);
+        der.insert(der.begin() + lenPos + 2, totalLen & 0xFF);
+    }
+}
+
 std::vector<unsigned char> TransactionManager::encryptFancyOFB(const std::string& plaintext,
     const std::vector<unsigned char>& key,
     const std::vector<unsigned char>& iv) {
     std::vector<unsigned char> ciphertext;
     std::vector<unsigned char> data(plaintext.begin(), plaintext.end());
 
-    // Inverseaza IV-ul
     std::vector<unsigned char> invIV = invertIV(iv);
-
-    // Ajusteaza cheia la 16 bytes
     std::vector<unsigned char> aesKey(16);
+
     if (key.size() >= 16) {
         std::copy(key.begin(), key.begin() + 16, aesKey.begin());
     }
@@ -95,7 +183,6 @@ std::vector<unsigned char> TransactionManager::encryptFancyOFB(const std::string
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
     if (!ctx) return ciphertext;
 
-    // Folosim AES-128-ECB pentru a cripta blocuri individuale
     EVP_EncryptInit_ex(ctx, EVP_aes_128_ecb(), NULL, aesKey.data(), NULL);
     EVP_CIPHER_CTX_set_padding(ctx, 0);
 
@@ -103,25 +190,20 @@ std::vector<unsigned char> TransactionManager::encryptFancyOFB(const std::string
     std::vector<unsigned char> keystream(16);
     std::copy(iv.begin(), iv.end(), state.begin());
 
-    // Proceseaza pe blocuri
     for (size_t i = 0; i < data.size(); i += 16) {
-        // Cripteaza state-ul
         int len;
         std::vector<unsigned char> aesOutput(16);
         EVP_EncryptUpdate(ctx, aesOutput.data(), &len, state.data(), 16);
 
-        // XOR cu invIV pentru keystream
         for (int j = 0; j < 16; j++) {
             keystream[j] = aesOutput[j] ^ invIV[j];
         }
 
-        // XOR cu datele
         size_t blockSize = std::min(size_t(16), data.size() - i);
         for (size_t j = 0; j < blockSize; j++) {
             ciphertext.push_back(data[i + j] ^ keystream[j]);
         }
 
-        // Updateaza state
         std::copy(aesOutput.begin(), aesOutput.end(), state.begin());
     }
 
@@ -129,7 +211,7 @@ std::vector<unsigned char> TransactionManager::encryptFancyOFB(const std::string
     return ciphertext;
 }
 
-std::vector<unsigned char> TransactionManager::signWithRSA(const std::string& data,
+std::vector<unsigned char> TransactionManager::signWithRSA(const std::vector<unsigned char>& data,
     int entityId,
     const std::string& password) {
     std::vector<unsigned char> signature;
@@ -143,9 +225,8 @@ std::vector<unsigned char> TransactionManager::signWithRSA(const std::string& da
         return signature;
     }
 
-    // Semneaza cu SHA256
     if (EVP_DigestSignInit(mdctx, NULL, EVP_sha256(), NULL, rsaKey) != 1 ||
-        EVP_DigestSignUpdate(mdctx, data.c_str(), data.length()) != 1) {
+        EVP_DigestSignUpdate(mdctx, data.data(), data.size()) != 1) {
         EVP_MD_CTX_free(mdctx);
         EVP_PKEY_free(rsaKey);
         return signature;
@@ -165,7 +246,6 @@ std::vector<unsigned char> TransactionManager::signWithRSA(const std::string& da
 
     EVP_MD_CTX_free(mdctx);
     EVP_PKEY_free(rsaKey);
-
     return signature;
 }
 
@@ -177,22 +257,25 @@ TransactionManager::SymmetricElements TransactionManager::loadSymmetricElements(
     std::ifstream file(filename);
     if (!file) return elements;
 
-    // Citeste base64
     std::string base64Content((std::istreambuf_iterator<char>(file)),
         std::istreambuf_iterator<char>());
     file.close();
 
-    // Decodifica
     std::vector<unsigned char> der = base64Decode(base64Content);
 
-    // Parse DER simplu
     size_t pos = 0;
 
-    // SEQUENCE
     if (der[pos++] != 0x30) return elements;
-    size_t seqLen = der[pos++];
+    size_t seqLen = der[pos];
+    pos++;
+    if (seqLen > 127) {
+        int lenBytes = seqLen & 0x7f;
+        seqLen = 0;
+        for (int i = 0; i < lenBytes; i++) {
+            seqLen = (seqLen << 8) | der[pos++];
+        }
+    }
 
-    // SymElementsID - INTEGER
     if (der[pos++] != 0x02) return elements;
     size_t idLen = der[pos++];
 
@@ -201,13 +284,11 @@ TransactionManager::SymmetricElements TransactionManager::loadSymmetricElements(
         elements.symElementsId = (elements.symElementsId << 8) | der[pos++];
     }
 
-    // SymKey - OCTET STRING
     if (der[pos++] != 0x04) return elements;
     size_t keyLen = der[pos++];
     elements.symKey.assign(der.begin() + pos, der.begin() + pos + keyLen);
     pos += keyLen;
 
-    // IV - OCTET STRING
     if (der[pos++] != 0x04) return elements;
     size_t ivLen = der[pos++];
     elements.iv.assign(der.begin() + pos, der.begin() + pos + ivLen);
@@ -223,99 +304,39 @@ bool TransactionManager::saveTransaction(const TransactionData& transaction) {
     std::ofstream file(filename, std::ios::binary);
     if (!file) return false;
 
-    // Construieste DER
     std::vector<unsigned char> der;
 
-    // SEQUENCE
     der.push_back(0x30);
     size_t seqLenPos = der.size();
     der.push_back(0);
 
-    // TransactionID - INTEGER
     der.push_back(0x02);
-    std::vector<unsigned char> idBytes;
-    int id = transaction.transactionId;
-    while (id > 0) {
-        idBytes.insert(idBytes.begin(), id & 0xFF);
-        id >>= 8;
-    }
+    std::vector<unsigned char> idBytes = encodeInteger(transaction.transactionId);
     der.push_back(idBytes.size());
     der.insert(der.end(), idBytes.begin(), idBytes.end());
 
-    // Subject - PrintableString
     der.push_back(0x13);
     der.push_back(transaction.subject.length());
     der.insert(der.end(), transaction.subject.begin(), transaction.subject.end());
 
-    // SenderID - INTEGER
     der.push_back(0x02);
-    idBytes.clear();
-    id = transaction.senderId;
-    while (id > 0) {
-        idBytes.insert(idBytes.begin(), id & 0xFF);
-        id >>= 8;
-    }
+    idBytes = encodeInteger(transaction.senderId);
     der.push_back(idBytes.size());
     der.insert(der.end(), idBytes.begin(), idBytes.end());
 
-    // ReceiverID - INTEGER
     der.push_back(0x02);
-    idBytes.clear();
-    id = transaction.receiverId;
-    while (id > 0) {
-        idBytes.insert(idBytes.begin(), id & 0xFF);
-        id >>= 8;
-    }
+    idBytes = encodeInteger(transaction.receiverId);
     der.push_back(idBytes.size());
     der.insert(der.end(), idBytes.begin(), idBytes.end());
 
-    // SymElementsID - INTEGER
     der.push_back(0x02);
-    idBytes.clear();
-    id = transaction.symElementsId;
-    while (id > 0) {
-        idBytes.insert(idBytes.begin(), id & 0xFF);
-        id >>= 8;
-    }
+    idBytes = encodeInteger(transaction.symElementsId);
     der.push_back(idBytes.size());
     der.insert(der.end(), idBytes.begin(), idBytes.end());
 
-    // EncryptedData - OCTET STRING
-    der.push_back(0x04);
-    if (transaction.encryptedData.size() < 128) {
-        der.push_back(transaction.encryptedData.size());
-    }
-    else {
-        der.push_back(0x81);
-        der.push_back(transaction.encryptedData.size());
-    }
-    der.insert(der.end(), transaction.encryptedData.begin(), transaction.encryptedData.end());
-
-    // Signature - OCTET STRING
-    der.push_back(0x04);
-    if (transaction.signature.size() < 128) {
-        der.push_back(transaction.signature.size());
-    }
-    else if (transaction.signature.size() < 256) {
-        der.push_back(0x81);
-        der.push_back(transaction.signature.size());
-    }
-    else {
-        der.push_back(0x82);
-        der.push_back((transaction.signature.size() >> 8) & 0xFF);
-        der.push_back(transaction.signature.size() & 0xFF);
-    }
-    der.insert(der.end(), transaction.signature.begin(), transaction.signature.end());
-
-    // Actualizeaza lungimea
-    size_t totalLen = der.size() - seqLenPos - 1;
-    if (totalLen < 128) {
-        der[seqLenPos] = totalLen;
-    }
-    else {
-        der[seqLenPos] = 0x81;
-        der.insert(der.begin() + seqLenPos + 1, totalLen);
-    }
+    encodeLengthAndData(der, 0x04, transaction.encryptedData);
+    encodeLengthAndData(der, 0x04, transaction.signature);
+    updateSequenceLength(der, seqLenPos);
 
     file.write(reinterpret_cast<const char*>(der.data()), der.size());
     file.close();

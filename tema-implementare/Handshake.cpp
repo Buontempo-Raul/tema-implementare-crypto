@@ -35,49 +35,64 @@ bool Handshake::performHandshake(int entityId1, int entityId2,
     // 2. Incarca cheile
     EVP_PKEY* privateKey1 = loadPrivateKey(entityId1, "ecc", password1);
     EVP_PKEY* publicKey2 = loadPublicKey(entityId2, "ecc");
-    EVP_PKEY* privateKey2 = loadPrivateKey(entityId2, "ecc", password2);
-    EVP_PKEY* publicKey1 = loadPublicKey(entityId1, "ecc");
 
-    if (!privateKey1 || !publicKey2 || !privateKey2 || !publicKey1) {
+    if (!privateKey1 || !publicKey2) {
         std::cerr << "Eroare la incarcarea cheilor!" << std::endl;
         if (privateKey1) EVP_PKEY_free(privateKey1);
         if (publicKey2) EVP_PKEY_free(publicKey2);
-        if (privateKey2) EVP_PKEY_free(privateKey2);
-        if (publicKey1) EVP_PKEY_free(publicKey1);
         return false;
     }
 
     // 3. ECDH
-    std::vector<unsigned char> sharedSecret1 = doECDH(privateKey1, publicKey2);
-    std::vector<unsigned char> sharedSecret2 = doECDH(privateKey2, publicKey1);
+    std::vector<unsigned char> sharedSecret = doECDH(privateKey1, publicKey2);
 
     // 4. Deriveaza cheile simetrice
-    SymmetricElements symElements1 = deriveSymmetricKey(sharedSecret1);
-    symElements1.symElementsId = entityId1; // Folosim ID-ul entității ca symElementsId
-
-    SymmetricElements symElements2 = deriveSymmetricKey(sharedSecret2);
-    symElements2.symElementsId = entityId2; // Folosim ID-ul entității ca symElementsId
-
-    // 5. Salveaza elementele simetrice cu ID-ul lor, nu cu ID-ul entității
-    bool success = saveSymmetricElements(symElements1, symElements1.symElementsId) &&
-        saveSymmetricElements(symElements2, symElements2.symElementsId);
+    SymmetricElements symElements = deriveSymmetricKey(sharedSecret);
 
     // Cleanup
     EVP_PKEY_free(privateKey1);
     EVP_PKEY_free(publicKey2);
-    EVP_PKEY_free(privateKey2);
-    EVP_PKEY_free(publicKey1);
+
+    Logger::getInstance()->log(entityId1, "Handshake realizat cu " + std::to_string(entityId2));
+    Logger::getInstance()->log(entityId2, "Handshake realizat cu " + std::to_string(entityId1));
+
+    return true;
+}
+
+bool Handshake::generateSymmetricElementsForTransaction(int transactionId,
+    int senderId, int receiverId,
+    const std::string& senderPassword) {
+
+    std::cout << "\n=== Generare elemente simetrice pentru tranzactia " << transactionId << " ===" << std::endl;
+
+    EVP_PKEY* senderPrivKey = loadPrivateKey(senderId, "ecc", senderPassword);
+    EVP_PKEY* receiverPubKey = loadPublicKey(receiverId, "ecc");
+
+    if (!senderPrivKey || !receiverPubKey) {
+        std::cerr << "Eroare la incarcarea cheilor pentru tranzactia " << transactionId << std::endl;
+        if (senderPrivKey) EVP_PKEY_free(senderPrivKey);
+        if (receiverPubKey) EVP_PKEY_free(receiverPubKey);
+        return false;
+    }
+
+    std::vector<unsigned char> sharedSecret = doECDH(senderPrivKey, receiverPubKey);
+
+    SymmetricElements symElements = deriveSymmetricKey(sharedSecret);
+    symElements.symElementsId = transactionId;
+
+    bool success = saveSymmetricElements(symElements, transactionId);
+
+    EVP_PKEY_free(senderPrivKey);
+    EVP_PKEY_free(receiverPubKey);
 
     if (success) {
-        Logger::getInstance()->log(entityId1, "Handshake realizat cu " + std::to_string(entityId2));
-        Logger::getInstance()->log(entityId2, "Handshake realizat cu " + std::to_string(entityId1));
+        Logger::getInstance()->log(senderId, "Elemente simetrice generate pentru tranzactia " + std::to_string(transactionId));
     }
 
     return success;
 }
 
 bool Handshake::verifyMAC(int entityId, const std::string& keyType) {
-    // Simplificat - doar verifica daca fisierul MAC exista
     std::string macFile = std::to_string(entityId) + "_" + keyType + ".mac";
     std::ifstream file(macFile);
     bool exists = file.good();
@@ -146,24 +161,19 @@ Handshake::SymmetricElements Handshake::deriveSymmetricKey(
     const std::vector<unsigned char>& sharedSecret) {
     SymmetricElements elements;
 
-    // Pentru simplitate, folosim direct secretul partajat
     std::vector<unsigned char> x = sharedSecret;
     std::vector<unsigned char> y = sha256(sharedSecret);
 
-    // SymLeft = SHA256(x) impartit in 2 si facut XOR
     std::vector<unsigned char> hash = sha256(x);
     std::vector<unsigned char> part1(hash.begin(), hash.begin() + 16);
     std::vector<unsigned char> part2(hash.begin() + 16, hash.end());
     std::vector<unsigned char> symLeft = xorBytes(part1, part2);
 
-    // SymRight = PBKDF2-SHA384(y)
     std::vector<unsigned char> symRight = pbkdf2_sha384(y);
 
-    // SymKey = SymLeft XOR first_16_bytes(SymRight)
     std::vector<unsigned char> first16(symRight.begin(), symRight.begin() + 16);
     elements.symKey = xorBytes(symLeft, first16);
 
-    // IV = urmatoarele 16 bytes din SymRight
     if (symRight.size() >= 32) {
         elements.iv = std::vector<unsigned char>(symRight.begin() + 16, symRight.begin() + 32);
     }
@@ -177,15 +187,12 @@ Handshake::SymmetricElements Handshake::deriveSymmetricKey(
 bool Handshake::saveSymmetricElements(const SymmetricElements& elements, int symElementsId) {
     std::string filename = std::to_string(symElementsId) + ".sym";
 
-    // Construieste DER
     std::vector<unsigned char> der;
 
-    // SEQUENCE
     der.push_back(0x30);
     size_t seqLenPos = der.size();
     der.push_back(0);
 
-    // SymElementsID - INTEGER
     der.push_back(0x02);
     std::vector<unsigned char> idBytes;
     int id = elements.symElementsId;
@@ -193,23 +200,22 @@ bool Handshake::saveSymmetricElements(const SymmetricElements& elements, int sym
         idBytes.insert(idBytes.begin(), id & 0xFF);
         id >>= 8;
     }
+    if (idBytes.empty()) {
+        idBytes.push_back(0);
+    }
     der.push_back(idBytes.size());
     der.insert(der.end(), idBytes.begin(), idBytes.end());
 
-    // SymKey - OCTET STRING
     der.push_back(0x04);
     der.push_back(elements.symKey.size());
     der.insert(der.end(), elements.symKey.begin(), elements.symKey.end());
 
-    // IV - OCTET STRING
     der.push_back(0x04);
     der.push_back(elements.iv.size());
     der.insert(der.end(), elements.iv.begin(), elements.iv.end());
 
-    // Actualizeaza lungimea
     der[seqLenPos] = der.size() - seqLenPos - 1;
 
-    // Encodeaza Base64
     BIO* b64 = BIO_new(BIO_f_base64());
     BIO* mem = BIO_new(BIO_s_mem());
     BIO_push(b64, mem);
@@ -223,7 +229,6 @@ bool Handshake::saveSymmetricElements(const SymmetricElements& elements, int sym
     std::string base64Data(bptr->data, bptr->length);
     BIO_free_all(b64);
 
-    // Salveaza in fisier
     std::ofstream file(filename);
     if (!file) return false;
 
@@ -244,8 +249,8 @@ std::vector<unsigned char> Handshake::pbkdf2_sha384(const std::vector<unsigned c
     std::vector<unsigned char> key(48);  // SHA-384 produce 48 bytes
 
     PKCS5_PBKDF2_HMAC(reinterpret_cast<const char*>(data.data()), data.size(),
-        nullptr, 0,  // fara salt
-        10000,       // iteratii
+        nullptr, 0,  
+        10000,       
         EVP_sha384(),
         key.size(), key.data());
 

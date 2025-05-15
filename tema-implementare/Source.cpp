@@ -16,7 +16,7 @@ int main(int argc, char* argv[]) {
     std::cout << "=== Aplicatie Criptografie ===" << std::endl;
     std::cout << "Fisier intrare: " << inputFile << std::endl << std::endl;
 
-    // 1. Parseaza fisierul
+    // Parsare fisier
     FileParser parser(inputFile);
     if (!parser.parse()) {
         std::cerr << "Eroare la parsare!" << std::endl;
@@ -25,7 +25,7 @@ int main(int argc, char* argv[]) {
 
     parser.printData();
 
-    // 2. Genereaza cheile
+    // Generare chei
     std::cout << "\n=== Generare chei ===" << std::endl;
 
     KeyGenerator keyGen;
@@ -38,12 +38,11 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // 3. Realizeaza handshake
+    // Realizare handshake
     std::cout << "\n=== Handshake ===" << std::endl;
 
     Handshake handshake;
 
-    // Pentru fiecare pereche de entitati
     for (size_t i = 0; i < entities.size(); i++) {
         for (size_t j = i + 1; j < entities.size(); j++) {
             if (!handshake.performHandshake(entities[i].id, entities[j].id,
@@ -55,14 +54,34 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // 4. Proceseaza tranzactiile
-    std::cout << "\n=== Procesare tranzactii ===" << std::endl;
+    // Generare elemente simetrice
+    std::cout << "\n=== Generare elemente simetrice pentru tranzactii ===" << std::endl;
 
-    TransactionManager transMgr;
     std::vector<Transaction> transactions = parser.getTransactions();
 
     for (const auto& trans : transactions) {
-        // Gaseste parola expeditorului
+        std::string senderPassword;
+        for (const auto& entity : entities) {
+            if (entity.id == trans.senderId) {
+                senderPassword = entity.password;
+                break;
+            }
+        }
+
+        if (!handshake.generateSymmetricElementsForTransaction(
+            trans.transactionId, trans.senderId, trans.receiverId, senderPassword)) {
+            std::cerr << "Eroare la generarea elementelor simetrice pentru tranzactia "
+                << trans.transactionId << std::endl;
+            return 1;
+        }
+    }
+
+    // Procesare tranzactii
+    std::cout << "\n=== Procesare tranzactii ===" << std::endl;
+
+    TransactionManager transMgr;
+
+    for (const auto& trans : transactions) {
         std::string senderPassword;
         for (const auto& entity : entities) {
             if (entity.id == trans.senderId) {

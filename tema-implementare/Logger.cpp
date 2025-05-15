@@ -7,7 +7,7 @@
 Logger* Logger::instance = nullptr;
 
 Logger::Logger() {
-    logFile.open("info.log", std::ios::out | std::ios::trunc);
+    logFile.open("info.log", std::ios::out | std::ios::binary | std::ios::trunc);
     if (!logFile.is_open()) {
         std::cerr << "Nu s-a putut deschide fisierul de log!" << std::endl;
     }
@@ -31,15 +31,22 @@ void Logger::log(int entityId, const std::string& action) {
         return;
     }
 
+    time_t now = time(0);
+    struct tm timeinfo;
+    localtime_s(&timeinfo, &now);
+
     std::string date = getCurrentDate();
     std::string time = getCurrentTime();
 
-    // Format: <data><timp><entitate><actiune>
-    logFile << "<" << date << ">"
-        << "<" << time << ">"
-        << "<" << entityId << ">"
-        << "<" << action << ">"
-        << std::endl;
+    logFile.write(date.c_str(), 8);
+    logFile.write(time.c_str(), 6);
+
+    logFile.write(reinterpret_cast<const char*>(&entityId), sizeof(int));
+
+    int actionLen = action.length();
+    logFile.write(reinterpret_cast<const char*>(&actionLen), sizeof(int));
+    logFile.write(action.c_str(), actionLen);
+
     logFile.flush();
 }
 
